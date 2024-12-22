@@ -1,0 +1,121 @@
+import pandas as pd
+
+# Input file paths
+input1_path = "inp1.csv"  # Student and course details
+input2_path = "inp2.csv"  # Exam timetable
+input3_path = "inp3.csv"  # Room data
+output1_path = "output1.csv"  # Seating plan
+output2_path = "output2.csv"  # Room capacity and vacancy per day
+
+# Configuration parameters
+buffer_per_room = 0  # Buffer of students per room (set 0 for no buffer)
+allocation_mode = "Dense"  # "Dense" or "Sparse" (Sparse limits capacity usage)
+optimize_locality = True  # Try to allocate exams in rooms closer to each other
+
+# Read and preprocess input2 (Exam Timetable)
+inp2 = pd.read_csv(input2_path)
+
+# Drop empty columns (caused by trailing commas in CSV)
+inp2 = inp2.dropna(axis=1, how="all")
+
+# Validate required columns in inp2
+required_columns = {"Date", "Day", "Morning", "Evening"}
+if not required_columns.issubset(inp2.columns):
+    raise ValueError(f"Input file {input2_path} is missing one or more required columns: {required_columns}")
+
+# Read and validate input1 (Student and Course Details)
+inp1 = pd.read_csv(input1_path)
+required_columns_inp1 = {"rollno", "course_code"}
+if not required_columns_inp1.issubset(inp1.columns):
+    raise ValueError(f"Input file {input1_path} is missing one or more required columns: {required_columns_inp1}")
+
+# Read and validate input3 (Room data)
+inp3 = pd.read_csv(input3_path)
+required_columns_inp3 = {"Room No.", "Exam Capacity", "Block"}
+if not required_columns_inp3.issubset(inp3.columns):
+    raise ValueError(f"Input file {input3_path} is missing one or more required columns: {required_columns_inp3}")
+
+# Prepare room data and track vacant seats
+room_df = inp3.copy()
+room_df["Vacant"] = room_df["Exam Capacity"].copy()
+
+# Sort rooms: Block 9 first, then LT, and within Block 9, sort rooms by floor number
+room_df = room_df.sort_values(by=["Block", "Room No."], ascending=[True, True])
+
+# Prepare seating plan (output1.csv)
+seating_plan = []
+room_usage = {room: 0 for room in room_df["Room No."]}  # Tracks usage per room
+
+# List to track vacant seats per room on each day for output2
+vacancy_per_day = []
+
+# Process each exam session (morning/evening)
+for _, exam in inp2.iterrows():
+    date, day = exam["Date"], exam["Day"]
+    
+    # Track the vacancies for the rooms on this specific day
+    daily_vacancy = room_df.copy()
+    daily_vacancy["Date"] = date  # Add date to track for output2
+    
+    for session in ["Morning", "Evening"]:
+        if exam[session] != "NO EXAM":
+            courses = [course.strip() for course in exam[session].split(";")]
+            courses.sort(key=lambda x: len(inp1[inp1["course_code"] == x]), reverse=True)  # Fill large courses first
+            for course in courses:
+                student_rolls = inp1[inp1["course_code"] == course]["rollno"].tolist()
+                room_index = 0
+                while student_rolls:
+                    # Allocate students to rooms based on capacity
+                    room = room_df.iloc[room_index]
+                    room_capacity = room["Exam Capacity"]
+
+                    # Apply buffer if required
+                    capacity_with_buffer = room_capacity - buffer_per_room if buffer_per_room > 0 else room_capacity
+
+                    # Dense or Sparse allocation
+                    if allocation_mode == "Sparse":
+                        # In Sparse mode, fill half the room
+                        half_capacity = room_capacity // 2
+                        allocated_students = student_rolls[:half_capacity]  # Fill only half capacity
+                        remaining_vacant = room_capacity - len(allocated_students)  # Update vacant seats
+                        room_df.at[room_index, "Vacant"] = remaining_vacant
+                    else:
+                        # In Dense mode, fill the room fully (up to room capacity minus buffer)
+                        allocated_students = student_rolls[:capacity_with_buffer]
+                        remaining_vacant = room_capacity - len(allocated_students)
+                        room_df.at[room_index, "Vacant"] = remaining_vacant
+
+                    seating_plan.append({
+                        "Date": date,
+                        "Day": day,
+                        "course_code": course,
+                        "Room": room["Room No."],
+                        "Allocated_students_count": len(allocated_students),
+                        "Roll_list (semicolon separated_)": ";".join(allocated_students),
+                    })
+
+                    # Update room usage and vacant seats
+                    room_usage[room["Room No."]] += len(allocated_students)
+                    student_rolls = student_rolls[len(allocated_students):]
+
+                    # Move to the next room if current one is full (in Sparse, leave half vacant)
+                    room_index += 1
+                    if room_index >= len(room_df):
+                        break
+    
+    # After processing all sessions for this day, add the vacancy and capacity data for output2
+    daily_vacancy["Vacant"] = daily_vacancy["Exam Capacity"] - room_df["Vacant"]
+    daily_vacancy["Capacity"] = daily_vacancy["Exam Capacity"]  # Add capacity for each room
+    daily_vacancy["Block"] = daily_vacancy["Block"]  # Ensure block is added
+    vacancy_per_day.append(daily_vacancy[["Date", "Room No.", "Capacity", "Vacant", "Block"]])
+
+# Concatenate all daily vacancies and save to output2.csv
+vacancy_df = pd.concat(vacancy_per_day, ignore_index=True)
+vacancy_df.to_csv(output2_path, index=False)
+
+# Save output1.csv (seating plan)
+seating_df = pd.DataFrame(seating_plan)
+seating_df.to_csv(output1_path, index=False)
+
+print(f"Seating plan saved to {output1_path}")
+print(f"Room capacity and vacancy saved to {output2_path}")
